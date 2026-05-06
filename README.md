@@ -6,6 +6,8 @@
 
 `pip install matplotlib`
 
+`pip install pytest`
+
 ## Running the Code
 
 1. place image into `input` folder
