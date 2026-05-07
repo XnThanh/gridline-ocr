@@ -4,6 +4,7 @@ import os
 import matplotlib.pyplot as plt
 from datetime import datetime
 import re
+import warnings
 
 def load_image_as_grayscale(im_name: str) -> np.ndarray:
     """
@@ -77,6 +78,49 @@ def get_vertical_projection_profile(image: np.ndarray, img_name: str, dont_save=
 
     return profile
 
+def estimate_threshold_and_gap(horizontal_profile: np.ndarray) -> tuple[float, int]:
+    """
+    Dynamically estimates threshold and min_gap by normalizing the profile
+    to its own range, making it robust to different backgrounds and resolutions.
+    """
+    # normalize profile to 0-1 range based on its own min and max
+    # p_min = np.min(horizontal_profile)
+    # p_max = np.max(horizontal_profile)
+    p_min = np.percentile(horizontal_profile, 5)  # 5th percentile to account for outliers (ex: A1)
+    p_max = np.percentile(horizontal_profile, 95)
+    normalized = (horizontal_profile - p_min) / (p_max - p_min + 1e-6)
+    normalized = np.clip(normalized, 0.0, 1.0) # sets outliers to 0 or 1 instead of negative or above 1 (kinda like ReLu)
+
+    # row must be at least 20% above normalized signal to be considered not a gap
+    threshold_normalized = 0.20
+
+    # set threshold (multiply by p_max-p_min to convert back to original scale)
+    threshold = p_min + threshold_normalized * (p_max - p_min)
+
+    # estimate gap from the normalized profile
+    is_empty = normalized < threshold_normalized  # boolean array
+    gap_lengths = [] # list of lengths of consecutive True values in is_empty
+    count = 0
+    for val in is_empty:
+        if val:
+            count += 1
+        else:
+            if count > 0:
+                gap_lengths.append(count)
+                count = 0
+    if count > 0:
+        gap_lengths.append(count)
+
+    if len(gap_lengths) == 0:
+        min_gap = 3
+        warnings.warn("No gaps detected in profile. Defaulting to min_gap=3.")
+    else:
+        # use 25th percentile of gap lengths (account for gap between lines within same entry)
+        min_gap = max(2, int(np.percentile(gap_lengths, 25)))
+
+    print(f"Normalized threshold: {threshold:.1f}, min_gap: {min_gap}")
+    return threshold, min_gap
+
 def slice_rows(image: np.ndarray, horizontal_profile: np.ndarray, threshold=500, min_gap=5) -> list:
     """
     Uses the horizontal projection profile to slice the image horizontally where gridlines were detected,
@@ -110,6 +154,8 @@ def slice_rows(image: np.ndarray, horizontal_profile: np.ndarray, threshold=500,
 
                 if gap_length >= min_gap:
                     # large enough gap detected, make slice
+
+                    # TODO add 5px buffer
                     slices.append(image[start:i, :])
                     in_gap = True
 
@@ -150,12 +196,14 @@ def process_image(img_file: str, test=False) -> list:
     # vertical_profile = get_vertical_projection_profile(horizontal_profile, img_name)
 
     # find background color to set as threshold for slicing rows (good for image with non-white backgrounds)
-    background_color = np.percentile(horizontal_profile, 60)
-    threshold = max(background_color+300, 500)
-    gap = 5
-    print("threshold:", threshold)
-    print("gap:", gap)
-    print(horizontal_profile)
+    # background_color = np.percentile(horizontal_profile, 60)
+    # threshold = max(background_color+300, 500)
+    # gap = 5
+
+    threshold, gap = estimate_threshold_and_gap(horizontal_profile)
+    # print("threshold:", threshold)
+    # print("gap:", gap)
+    # print(horizontal_profile)
 
     print("Slicing rows...")
     row_slices = slice_rows(image, horizontal_profile, threshold, gap)

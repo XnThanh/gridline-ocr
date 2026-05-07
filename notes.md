@@ -8,4 +8,6 @@ Added dynamic threshold by selecting the lower 10th percentile of horizontal pro
 
 Adjusted threshold percentile to 15, decreased gap to 5, passed for A1, but fails D1 because of too little gap. However, looking closely at D1, it seems to be a hard edge case because the gap between lines is not consistent.
 
-Tested C1 (green-colored background), needed to adjust threshold to 60 percentile to work.
+Tested C1 (green-colored background), needed to adjust threshold to 60 percentile to work. But 60th percentile caused over-slicing in A1 and D1. It also made slices slightly smaller (some of the words/lines were cut off at top and bottom)
+
+Seems like outliers in signal is causing overfitting to some datasets. Switched to trying to normalize horizontal profile and estimating threshold and gap through normalized signal that cuts off outliers. Does much better, passing A1 and E1. C1 is mostly correct, but has [one slice](slices/normalized-C1/vocab-page-C1_row_16.png) that contained 2 entries. D1 is mostly correct, but had [one entry](slices/normalized-D1/vocab-page-D1_row_15.png) that was sliced in between (but this was expected because the spacing between this and the entry below is closer than the entry above)

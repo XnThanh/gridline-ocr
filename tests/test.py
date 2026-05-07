@@ -41,6 +41,9 @@ TEST_DATA = {
     "SetD": [
         ("D1", "setD/vocab-page-D1", 16),
     ],
+    "SetE": [
+        ("E1", "setE/vocab-page-E1", 12),
+    ],
 }
 
 
@@ -129,6 +132,26 @@ class TestSetD:
         
         print(f"✓ {image_id} passed: {actual_slices} row slices generated")
 
+class TestSetE:
+    """Tests for setE images - parametrized for all images in the set"""
+    
+    @pytest.mark.parametrize(
+        "image_id,image_path,expected_slices",
+        TEST_DATA["SetE"],
+        ids=[item[0] for item in TEST_DATA["SetE"]]
+    )
+    def test(self, image_id, image_path, expected_slices):
+        """Dynamically run tests for each image in SetE"""
+        row_slices = process_image(image_path)
+        actual_slices = len(row_slices) if row_slices is not None else 0
+        
+        if expected_slices is None:
+            raise Exception(f"{image_id}: No expected slice count provided. Please update TEST_DATA with the expected number of slices.")
+
+        assert actual_slices == expected_slices, \
+            f"{image_id}: Expected {expected_slices} slices, got {actual_slices}"
+        
+        print(f"✓ {image_id} passed: {actual_slices} row slices generated")
 
 if __name__ == "__main__":
     # Allow running this file directly
