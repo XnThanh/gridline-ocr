@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import re
 import warnings
+from enum import Enum
 
 def load_image_as_grayscale(im_name: str) -> np.ndarray:
     """
@@ -35,7 +36,7 @@ def load_image_as_grayscale(im_name: str) -> np.ndarray:
             return (inverted, stripped_name) 
             # return image.astype(np.float32)
 
-def get_horizontal_projection_profile(image: np.ndarray, img_name: str, dont_save=False) -> np.ndarray:
+def get_horizontal_projection_profile(image: np.ndarray, img_name: str, save_profiles=True) -> np.ndarray:
     """
     Computes the horizontal projection profile of the image.
     Returns a 1D array where each element is the sum of pixel values in that row.
@@ -44,7 +45,7 @@ def get_horizontal_projection_profile(image: np.ndarray, img_name: str, dont_sav
     # space between lines of text vs space between each entry
     profile = np.sum(image, axis=1)  # one value per row
 
-    if not dont_save:
+    if save_profiles:
         plt.figure(figsize=(10, 4))
         plt.plot(profile)
         plt.title("Horizontal Projection Profile")
@@ -57,7 +58,7 @@ def get_horizontal_projection_profile(image: np.ndarray, img_name: str, dont_sav
 
     return profile
 
-def get_vertical_projection_profile(image: np.ndarray, img_name: str, dont_save=False) -> np.ndarray:
+def get_vertical_projection_profile(image: np.ndarray, img_name: str, save_profiles=True) -> np.ndarray:
     """
     Computes the vertical projection profile of the image.
     Returns a 1D array where each element is the sum of pixel values in that column.
@@ -66,17 +67,41 @@ def get_vertical_projection_profile(image: np.ndarray, img_name: str, dont_save=
     ## SHOULD THIS BE A VERTICAL PROJECTION OF THE ORIGINAL IMAGE, OR THE HORIZONTAL PROJECTION?
     profile = np.sum(image, axis=0)  # one value per column
 
-    plt.figure(figsize=(10, 4))
-    plt.plot(profile)
-    plt.title("Vertical Projection Profile")
-    plt.xlabel("Column index")
-    plt.ylabel("Sum of pixel values")
-    plt.tight_layout()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plt.savefig(f"projection-profiles/{img_name}-vertical-{timestamp}.png")
-    plt.close()
+    if save_profiles:
+        plt.figure(figsize=(10, 4))
+        plt.plot(profile)
+        plt.title("Vertical Projection Profile")
+        plt.xlabel("Column index")
+        plt.ylabel("Sum of pixel values")
+        plt.tight_layout()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        plt.savefig(f"projection-profiles/{img_name}-vertical-{timestamp}.png")
+        plt.close()
 
     return profile
+
+def normalize_profile(profile: np.ndarray, img_name: str, save_profiles=True) -> np.ndarray:
+    """
+    Normalizes a projection profile to the range [0.0, 1.0] based on its own min and max values.
+    This makes it more robust to different backgrounds and resolutions.
+    """
+    p_min = np.percentile(profile, 5)  # 5th percentile to account for outliers (ex: A1 - rim of white, see A1 projection profile)
+    p_max = np.percentile(profile, 95)
+    normalized = (profile - p_min) / (p_max - p_min + 1e-6)
+    normalized = np.clip(normalized, 0.0, 1.0) # sets outliers to 0 or 1 instead of negative or above 1 (kinda like ReLu)
+    
+    if save_profiles:
+        plt.figure(figsize=(10, 4))
+        plt.plot(normalized)
+        plt.title("Normalized Horizontal Projection Profile")
+        plt.xlabel("Row index")
+        plt.ylabel("Normalized sum of pixel values")
+        plt.tight_layout()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        plt.savefig(f"projection-profiles/{img_name}-normalized-horizontal-{timestamp}.png")
+        plt.close()
+
+    return normalized
 
 def estimate_threshold_and_gap(horizontal_profile: np.ndarray) -> tuple[float, int]:
     """
@@ -166,6 +191,118 @@ def slice_rows(image: np.ndarray, horizontal_profile: np.ndarray, threshold=500,
     print(f"Found {len(slices)} row slices.")
     return slices
 
+def detect_entry_boundaries(norm_horizontal_profile_left: np.ndarray, norm_horizontal_profile_right: np.ndarray, norm_horizontal_profile_full: np.ndarray) -> list[int]:
+    """
+    Uses the horizontal projection profiles of the left and right halves of the image
+    to detect the row indices where each vocabulary entry begins.
+    
+    Returns a tuple of two elements:
+    - a list of row indices where each entry begins
+    - a list of row indices where each entry ends
+    """
+    is_empty_left = norm_horizontal_profile_left < 0.01
+    is_empty_right = norm_horizontal_profile_right < 0.01
+    is_empty_full = norm_horizontal_profile_full < 0.01
+
+    def is_gap(row_idx, profile_type):
+        if profile_type == ProfileType.LEFT:
+            return is_empty_left[row_idx]
+        elif profile_type == ProfileType.RIGHT:
+            return is_empty_right[row_idx]
+        elif profile_type == ProfileType.FULL:
+            return is_empty_full[row_idx]
+        
+    def is_content(row_idx, profile_type):
+        if profile_type == ProfileType.LEFT:
+            return not is_empty_left[row_idx]
+        elif profile_type == ProfileType.RIGHT:
+            return not is_empty_right[row_idx]
+        elif profile_type == ProfileType.FULL:
+            return not is_empty_full[row_idx]
+
+    ### STEP 1: get entry boundaries based on left normalized profile ###
+
+    entry_starts = []  # list of row indices where entry start (transition from GAP to CONTENT in is_empty_left)
+    entry_ends = []    # list of row indices where entry end (transition from CONTENT to GAP in is_empty_left)
+
+    # edge case page starts with an entry (no leading gap)
+    if is_content(0, ProfileType.LEFT):
+        entry_starts.append(0)
+
+    for i in range(1, len(is_empty_left)):
+        # gap to content transition
+        if is_gap(i-1, ProfileType.LEFT) and is_content(i, ProfileType.LEFT):
+            entry_starts.append(i)
+        # content to gap transition
+        elif is_content(i-1, ProfileType.LEFT) and is_gap(i, ProfileType.LEFT):
+            entry_ends.append(i)
+    
+    # ends with content (no gap at page bottom), add unmatched end
+    if is_content(-1, ProfileType.LEFT):
+        entry_ends.append(len(is_empty_left) - 1)
+
+    assert len(entry_starts) - len(entry_ends) == 0, f"Mismatched entry starts and ends. Starts: {len(entry_starts)}, Ends: {len(entry_ends)}"
+
+    ### STEP 2: remove stylistic elements, such as horizontal separator lines ###
+    # remove stylistic elements (content with height < 10px)
+    height_threshold = 10
+    filtered_entry_starts = []
+    filtered_entry_ends = []
+    min_entry_height = float('inf')
+
+    for start, end in zip(entry_starts, entry_ends):
+        height = end-start
+        if height >= height_threshold:
+            filtered_entry_starts.append(start)
+            filtered_entry_ends.append(end)
+            min_entry_height = min(min_entry_height, height)
+
+    ### STEP 3: adjust entry end boundaries ###
+    # look at left, right, and full horizontal profile, and go back from the start of the next entry 
+    # until we hit content in either profile to find the true end of the current entry (accounts for multi-line translations)
+
+    for i in range(1, len(filtered_entry_starts)):
+        start = filtered_entry_starts[i]
+        end = filtered_entry_ends[i]
+        next_start = filtered_entry_starts[i + 1] if i + 1 < len(filtered_entry_starts) else len(is_empty_full) - 1
+        
+        # if the gap between this entry's end and the next entry's start is less than the smallest entry height, 
+        # then no need to adjust end because there isn't enough space for overflow content
+        if next_start - end < min_entry_height:
+            continue
+
+        # look back from the start of the next entry until we find content in left, right, or full profile
+        buffer = 3  # buffer to account for differences between left profile (which was used to detect the starts) and the other profiles
+        for j in range(next_start-buffer, end, -1):
+            if is_content(j, ProfileType.LEFT) or is_content(j, ProfileType.RIGHT) or is_content(j, ProfileType.FULL):
+                # found content, update entry end to this index
+                updated_entry_end = j
+                filtered_entry_ends[i] = updated_entry_end
+                print(f"Adjusted entry {i} end from {end} to {updated_entry_end}")
+                break
+
+    # print(f"START: {filtered_entry_starts}")
+    # print(f"END: {filtered_entry_ends}")
+    print(f"Detected {len(filtered_entry_starts)} entry boundaries.")
+    return (filtered_entry_starts, filtered_entry_ends)
+
+
+def slice_rows_v2(image: np.ndarray, boundaries: tuple[list[int], list[int]], buffer=5) -> list[np.ndarray]:
+    """
+    Slices the image into row bands using pre-detected boundary indices.
+    Each boundary marks the start of a new vocabulary entry.
+    
+    Returns a list of 2D numpy arrays, each being one row slice.
+    """
+    slices = []
+    for start, end in zip(boundaries[0], boundaries[1]):
+        slice_start = max(0, start - buffer)  # add buffer above
+        slice_end = min(image.shape[0], end + buffer)  # add buffer below
+        slices.append(image[slice_start:slice_end, :])
+
+    print(f"Sliced into {len(slices)} row entries.")
+    return slices
+
 def category_tagging():
     pass
 
@@ -175,13 +312,13 @@ def ocr():
 def to_spreadsheet():
     pass
 
-def process_image(img_file: str, test=False) -> list:
+def process_image(img_file: str, save_profiles=True) -> list:
     """
     Main processing function that can be called programmatically.
     
     Args:
         img_file: Image filename (can include subdirectory like "setA/vocab-page-A1")
-        min_gap: Minimum gap size for row slicing
+        save_profiles: Whether to save the projection profiles
         
     Returns:
         List of row slices as numpy arrays
@@ -190,23 +327,43 @@ def process_image(img_file: str, test=False) -> list:
 
     image, img_name = load_image_as_grayscale(img_file)
 
-    print("Calculating horizontal projection profile...")
-    horizontal_profile = get_horizontal_projection_profile(image, img_name, test)
-    # print("Calculating vertical projection profile...")
-    # vertical_profile = get_vertical_projection_profile(horizontal_profile, img_name)
+    # print("Calculating horizontal projection profile...")
+    # horizontal_profile = get_horizontal_projection_profile(image, img_name, test)
+    # # print("Calculating vertical projection profile...")
+    # # vertical_profile = get_vertical_projection_profile(horizontal_profile, img_name)
 
-    # find background color to set as threshold for slicing rows (good for image with non-white backgrounds)
-    # background_color = np.percentile(horizontal_profile, 60)
-    # threshold = max(background_color+300, 500)
-    # gap = 5
+    # # find background color to set as threshold for slicing rows (good for image with non-white backgrounds)
+    # # background_color = np.percentile(horizontal_profile, 60)
+    # # threshold = max(background_color+300, 500)
+    # # gap = 5
 
-    threshold, gap = estimate_threshold_and_gap(horizontal_profile)
-    # print("threshold:", threshold)
-    # print("gap:", gap)
-    # print(horizontal_profile)
+    # threshold, gap = estimate_threshold_and_gap(horizontal_profile)
+    # # print("threshold:", threshold)
+    # # print("gap:", gap)
+    # # print(horizontal_profile)
+
+    # print("Slicing rows...")
+    # row_slices = slice_rows(image, horizontal_profile, threshold, gap)
+
+    height, width = image.shape
+    if height < 100 or width < 100:
+        raise Exception("Image is too small")
+    mid = width // 2
+
+    print("Calculating projection profiles...")
+    hprofile_left = get_horizontal_projection_profile(image[:, :mid], img_name + "_left", save_profiles)
+    hprofile_right = get_horizontal_projection_profile(image[:, mid:], img_name + "_right", save_profiles)
+    hprofile_full = get_horizontal_projection_profile(image, img_name, save_profiles)
+
+    hnorm_profile_left = normalize_profile(hprofile_left, img_name + "_left", save_profiles)
+    hnorm_profile_right = normalize_profile(hprofile_right, img_name + "_right", save_profiles)
+    hnorm_profile_full = normalize_profile(hprofile_full, img_name + "_full", save_profiles)
+
+    print("Detecting entry boundaries...")
+    boundaries = detect_entry_boundaries(hnorm_profile_left, hnorm_profile_right, hnorm_profile_full)
 
     print("Slicing rows...")
-    row_slices = slice_rows(image, horizontal_profile, threshold, gap)
+    row_slices = slice_rows_v2(image, boundaries)
 
     # save each slice to slices folder
     for idx, s in enumerate(row_slices):
@@ -215,10 +372,15 @@ def process_image(img_file: str, test=False) -> list:
     
     return row_slices
 
+class ProfileType(Enum):
+    FULL = "full"
+    LEFT = "left"
+    RIGHT = "right"
+
 if __name__ == "__main__":
     print("---------------------------")
     print("Welcome to Gridline OCR!")
     print("---------------------------")
     print("Please upload image to input folder and enter the filename below.")
     img_file = input("Enter image filename (with .png or .jpg!): \n")
-    process_image(img_file)
+    process_image(img_file, save_profiles=False)
